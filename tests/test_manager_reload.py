@@ -2,7 +2,7 @@
 concurrent reloads and concurrent request/reload traffic."""
 
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -176,13 +176,21 @@ def test_slow_request_is_not_blocked_by_reload():
     assert manager.effective_state(policy, 2) is LifecycleState.DEPRECATED
 
 
-def test_reload_resets_high_water_for_new_policy_generation():
+def test_reload_does_not_reset_high_water_protection():
     clock = FakeClock(NOW)
     manager = PolicyManager(parse_policy(policy_doc(v2_deprecated()), now=NOW), clock=clock)
     old_policy = manager.current()
     assert manager.effective_state(old_policy, 2) is LifecycleState.DEPRECATED
 
-    # New policy generation starts with a fresh high-water mark.
-    new_policy = parse_policy(policy_doc(v3_available()), now=NOW)
+    # A reload must not reset the monotonic protection: after rolling the
+    # clock back, v2 stays deprecated under the reloaded policy.
+    new_policy = parse_policy(policy_doc(v2_deprecated()), now=NOW)
     manager.reload(new_policy)
-    assert manager.effective_state(new_policy, 3) is LifecycleState.AVAILABLE
+    clock.set(NOW - timedelta(days=365))
+    assert manager.effective_state(manager.current(), 2) is LifecycleState.DEPRECATED
+
+    # A version never observed at a higher rank is unaffected by the
+    # protection of other versions.
+    fresh_policy = parse_policy(policy_doc(v3_available()), now=clock.now())
+    manager.reload(fresh_policy)
+    assert manager.effective_state(fresh_policy, 3) is LifecycleState.AVAILABLE

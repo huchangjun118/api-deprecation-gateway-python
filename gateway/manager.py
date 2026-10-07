@@ -8,8 +8,11 @@
 * In-flight requests never block a reload: the swap is a single reference
   assignment, old snapshots are released naturally once requests finish.
 * Lifecycle states are derived from the injected clock and are monotonic
-  within a policy generation: a clock rollback can never make an already
-  offline version available again.
+  *across* policy generations: once a version has been observed in a state,
+  neither a clock rollback nor a policy reload (successful, identical or
+  failed) can move it back to an earlier state.  The high-water record is
+  keyed by version number only, so its size is bounded by the number of
+  versions, not by the number of reloads.
 """
 
 from __future__ import annotations
@@ -40,8 +43,12 @@ class PolicyManager:
         self._policy = policy
         self._stats = stats or VersionStats()
         self._reload_lock = threading.Lock()
-        # (policy-id, version) -> highest state rank ever observed for it.
-        self._high_water: dict[tuple[int, int], int] = {}
+        self._state_lock = threading.Lock()
+        # version -> highest state rank ever observed for it.  Keyed by
+        # version number alone so the protection survives reloads (including
+        # reloading identical content) and the record size stays bounded by
+        # the number of distinct versions, never by the number of reloads.
+        self._high_water: dict[int, int] = {}
 
     @property
     def clock(self) -> Clock:
@@ -108,14 +115,18 @@ class PolicyManager:
         """Derive the effective state, clamped to the high-water mark.
 
         A version that reached OFFLINE (or DEPRECATED) stays at least at that
-        rank even if the clock is rolled back afterwards.
+        rank even if the clock is rolled back afterwards or the policy is
+        reloaded — reloading identical content never resets the protection,
+        and a failed reload never touches it.  The read-modify-write of the
+        high-water mark is serialized so concurrent reloads and requests
+        cannot open a window where the protection lapses.
         """
         cfg = policy.require(version)
         derived = self.derive_state(cfg, self._clock.now())
-        key = (id(policy), version)
-        previous = self._high_water.get(key, derived.rank)
-        rank = max(derived.rank, previous)
-        self._high_water[key] = rank
+        with self._state_lock:
+            previous = self._high_water.get(version, derived.rank)
+            rank = max(derived.rank, previous)
+            self._high_water[version] = rank
         return state_for_rank(rank)
 
     def record_decision(self, version: int, state: LifecycleState) -> None:

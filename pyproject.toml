@@ -10,3 +10,9 @@ dependencies = [
 [[tool.uv.index]]
 url = "https://mirrors.aliyun.com/pypi/simple/"
 default = true
+
+[tool.pytest.ini_options]
+# Make the in-repo `gateway` package importable so `pytest` works from the
+# repository root without manual PYTHONPATH tweaks.
+pythonpath = ["."]
+testpaths = ["tests"]
