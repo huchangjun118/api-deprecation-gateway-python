@@ -7,6 +7,12 @@ dependencies = [
     "pytest>=8.0",
 ]
 
+[tool.pytest.ini_options]
+# Make the application package importable no matter how pytest is invoked
+# (plain `pytest`, `python -m pytest`, or from another environment).
+pythonpath = ["."]
+testpaths = ["tests"]
+
 [[tool.uv.index]]
 url = "https://mirrors.aliyun.com/pypi/simple/"
 default = true

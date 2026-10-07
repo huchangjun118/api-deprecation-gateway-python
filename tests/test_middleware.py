@@ -322,3 +322,62 @@ def test_requests_during_reload_are_self_consistent(client):
     for t in threads:
         t.join()
     assert errors == []
+
+
+# --- strict deciding-source negotiation (app level) -----------------------
+
+def test_invalid_lower_priority_source_does_not_block_request(client):
+    # The path decides; a garbage query param must not fail the request.
+    r = client.get("/v2/ping", params={"version": "abc"})
+    assert r.status_code == 200
+    assert r.headers["x-api-version"] == "2"
+    assert r.headers["x-api-version-source"] == "path"
+
+    # The path decides; a garbage header must not fail the request.
+    r = client.get("/v2/ping", headers={"x-api-version": "bogus"})
+    assert r.status_code == 200
+    assert r.headers["x-api-version-source"] == "path"
+
+
+def test_conflicting_lower_priority_media_type_does_not_block(client):
+    r = client.get(
+        "/v2/ping",
+        headers={"accept": "application/json; version=1, application/json; version=3"},
+    )
+    assert r.status_code == 200
+    assert r.headers["x-api-version"] == "2"
+
+
+def test_invalid_deciding_source_fails_request(client):
+    # No path version here: the header decides and is unparseable, even
+    # though a lower-priority query param carries a valid version.
+    r = client.get("/ping", headers={"x-api-version": "abc"}, params={"version": "3"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "version_invalid"
+
+
+def test_conflicting_media_type_versions_rejected(client):
+    r = client.get(
+        "/ping",
+        headers={"accept": "application/json; version=2, application/json; version=3"},
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "version_conflict"
+    assert r.json()["error"]["details"]["source"] == "media_type"
+
+
+def test_conflicting_duplicate_query_params_rejected(client):
+    r = client.get("/ping?version=2&version=3")
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "version_conflict"
+    assert r.json()["error"]["details"]["source"] == "query"
+
+
+def test_repeated_same_media_type_version_accepted(client):
+    r = client.get(
+        "/ping",
+        headers={"accept": "application/json; version=3, text/plain; version=3"},
+    )
+    assert r.status_code == 200
+    assert r.headers["x-api-version"] == "3"
+    assert r.headers["x-api-version-source"] == "media_type"

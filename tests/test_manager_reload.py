@@ -176,13 +176,32 @@ def test_slow_request_is_not_blocked_by_reload():
     assert manager.effective_state(policy, 2) is LifecycleState.DEPRECATED
 
 
-def test_reload_resets_high_water_for_new_policy_generation():
+def test_high_water_is_per_version_and_survives_reload():
     clock = FakeClock(NOW)
     manager = PolicyManager(parse_policy(policy_doc(v2_deprecated()), now=NOW), clock=clock)
     old_policy = manager.current()
     assert manager.effective_state(old_policy, 2) is LifecycleState.DEPRECATED
 
-    # New policy generation starts with a fresh high-water mark.
-    new_policy = parse_policy(policy_doc(v3_available()), now=NOW)
+    # A reload never resets the protection of a version already observed,
+    # even if the new policy declares that version as plain available...
+    new_policy = parse_policy(
+        policy_doc(
+            [
+                {
+                    "version": 2,
+                    "state": "available",
+                    "introduced_at": "2024-01-01T00:00:00Z",
+                },
+                {
+                    "version": 3,
+                    "state": "available",
+                    "introduced_at": "2025-01-01T00:00:00Z",
+                },
+            ]
+        ),
+        now=NOW,
+    )
     manager.reload(new_policy)
+    assert manager.effective_state(new_policy, 2) is LifecycleState.DEPRECATED
+    # ...while a version never observed before starts fresh.
     assert manager.effective_state(new_policy, 3) is LifecycleState.AVAILABLE

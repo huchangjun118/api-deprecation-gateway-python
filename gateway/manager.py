@@ -8,8 +8,12 @@
 * In-flight requests never block a reload: the swap is a single reference
   assignment, old snapshots are released naturally once requests finish.
 * Lifecycle states are derived from the injected clock and are monotonic
-  within a policy generation: a clock rollback can never make an already
-  offline version available again.
+  per *version* across the whole lifetime of the manager: once a version
+  has been observed in a state, neither a clock rollback nor a policy
+  reload (including reloading identical content, or a failed reload) can
+  ever make it available at an earlier state again.  The high-water
+  record is keyed by version number only, so its size is bounded by the
+  number of versions, not by the number of reloads.
 """
 
 from __future__ import annotations
@@ -40,8 +44,13 @@ class PolicyManager:
         self._policy = policy
         self._stats = stats or VersionStats()
         self._reload_lock = threading.Lock()
-        # (policy-id, version) -> highest state rank ever observed for it.
-        self._high_water: dict[tuple[int, int], int] = {}
+        # version -> highest state rank ever observed for it.  Keyed by
+        # version number (never by policy object), so the protection
+        # survives reloads and its size is bounded by the version count.
+        self._high_water: dict[int, int] = {}
+        # Guards high-water updates so concurrent requests can never lose
+        # a monotonic increase; held only for a dict lookup + store.
+        self._high_water_lock = threading.Lock()
 
     @property
     def clock(self) -> Clock:
@@ -108,14 +117,16 @@ class PolicyManager:
         """Derive the effective state, clamped to the high-water mark.
 
         A version that reached OFFLINE (or DEPRECATED) stays at least at that
-        rank even if the clock is rolled back afterwards.
+        rank even if the clock is rolled back afterwards — and even if the
+        policy is reloaded (with identical or different content) in between.
+        The clamp is applied under a lock so concurrent requests and reloads
+        can never open a window in which the protection briefly disappears.
         """
         cfg = policy.require(version)
         derived = self.derive_state(cfg, self._clock.now())
-        key = (id(policy), version)
-        previous = self._high_water.get(key, derived.rank)
-        rank = max(derived.rank, previous)
-        self._high_water[key] = rank
+        with self._high_water_lock:
+            rank = max(derived.rank, self._high_water.get(version, 0))
+            self._high_water[version] = rank
         return state_for_rank(rank)
 
     def record_decision(self, version: int, state: LifecycleState) -> None:
